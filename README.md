@@ -31,7 +31,7 @@ More information of the
 In case you are interested in reproduing the results shown in the manuscript you can easily install all required packages with the workflow from the [`renv`](https://rstudio.github.io/renv/index.html) package. This ensures also that the correct version of the required packages is installed.
 
 First clone the repository and then run the following command in an R session:
-```
+``` r
 # install all required packages using the renv package
 renv::restore()
 ```
