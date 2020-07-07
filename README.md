@@ -8,7 +8,14 @@ Hepatocellular carcinoma (HCC) is a leading cause of cancer-related deaths world
 ### Content
 This repository deals exclusively with the analysis of the **Human** RNA-seq data. The mouse models mentioned in the abstract were analyzed elsewhere. 
 
+More information of the
+
+* `data` folder [here]()
+* `output` folder [here]()
+
 ***
+
+
 
 ### How to cite?
 > Schneider KM, Mohs A, Gui W, Galvez EJC, Candels LS, Holland CH, Elfers C, Kilic K, Schneider CV, Strnad P, Wirtz TH, Marschall HU, Latz E, Lelouvier B, Saez-Rodriguez J, de Vos W, Strowig T, Trebicka J and Trautwein C. "Gut microbiota fuels HCC development by shaping the hepatic inflammatory microenvironment." _In preparation_. 2020.

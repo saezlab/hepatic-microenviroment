@@ -3,8 +3,10 @@
 .RData
 .Ruserdata
 data/*.rds
-data/*.R
+data/*.csv
 data/*.txt
-data/*.xlsx
+data/annotation
 output/*.rds
 output/*.csv
+
+*.html
