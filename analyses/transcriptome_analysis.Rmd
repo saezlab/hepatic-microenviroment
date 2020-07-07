@@ -1,0 +1,1131 @@
+---
+title: "trannscriptome_analysis"
+author: "Christian Holland"
+date: "3/11/2020"
+output: html_document
+---
+
+```{r "knitr config", cache=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::knit(..., quiet = TRUE)
+```
+
+### Libraries and sources
+These libraries and sources are used in this analysis 
+```{r "setup", message=F}
+library(tidyverse)
+library(tidylog)
+library(cowplot)
+library(biobroom)
+library(edgeR)
+library(progeny)
+library(dorothea)
+library(viper)
+library(ComplexHeatmap)
+library(circlize)
+library(xCell) #devtools::install_github('dviraran/xCell')
+
+
+options("tidylog.display" = list(print))
+
+source("src/my_ggplot_themes.R")
+source("src/utils.R")
+source("src/rnaseq.R")
+source("src/basic_plots.R")
+```
+
+### Preliminary exploratory analysis
+#### PCA
+```{r "pca"}
+count_matrix = read.table("data/Trautwein_human-rawdata.txt")
+meta = readRDS("data/meta_df.rds")
+
+stopifnot(colnames(count_matrix) ==  meta$sample)
+
+preprocessed_count_matrix = preprocess_count_matrix(count_matrix)
+
+pca_result = do_pca(preprocessed_count_matrix, meta, top_n_var_genes = NULL)
+
+plot_pca(pca_result, feature = "group")
+```
+
+#### Sample correlation
+```{r}
+count_matrix = read.table("data/Trautwein_human-rawdata.txt")
+meta = readRDS("data/meta_df.rds") %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F)
+
+count_matrix %>%
+  cor() %>%
+  pheatmap::pheatmap(annotation_col = meta, annotation_row = meta)
+```
+
+
+### Data processing
+#### Normalization
+```{r}
+meta = readRDS("data/meta_df.rds")
+count_matrix = read.table("data/Trautwein_human-rawdata.txt")
+
+stopifnot(meta$sample == colnames(count_matrix))
+
+dge_obj = DGEList(count_matrix, group = meta$group)
+
+# filter low read counts, TMM normalization and logCPM transformation
+norm = voom_normalization(dge_obj)
+
+saveRDS(norm, 
+        "output/normalized_expression.rds")
+```
+
+#### PCA
+```{r}
+expr = readRDS("output/normalized_expression.rds")
+meta = readRDS("data/meta_df.rds")
+
+
+pca_result = do_pca(expr, meta, top_n_var_genes = 2500)
+
+### PC1 vs PC2
+plot_pca(pca_result, feature = "group") +
+  my_theme()
+
+pca_result$coords %>%
+  ggplot(aes(x=PC1, y=PC2, label = sample, color=group)) +
+  geom_text() +
+  my_theme()
+
+pca_result$coords %>%
+  mutate(group = str_to_title(group)) %>%
+  ggplot(aes(x=PC1, y=PC2, color = group)) +
+  geom_point(size=2) +
+  labs(x = paste0("PC1 (", pca_result$var[1], "%)"),
+       y = paste0("PC2 (", pca_result$var[2], "%)"),
+       color = "Patient") +
+  my_theme(grid = "no") +
+  scale_color_manual(values = aachen_color(c("blue", "red"))) +
+  theme(legend.position = "top")
+```
+### Differential gene expression analysis
+#### Running limma
+```{r}
+# load expression and meta data
+expr = readRDS("output/normalized_expression.rds")
+meta = readRDS("data/meta_df.rds")
+
+stopifnot(colnames(expr) == meta$sample)
+
+# build design matrix
+design = model.matrix(~0+group, data=meta)
+rownames(design) = meta$sample
+colnames(design) = levels(meta$group)
+
+
+# define contrasts
+contrasts = makeContrasts(
+  cirrhosis_vs_control = cirrhosis - control,
+  levels = design
+)
+
+limma_result = run_limma(expr, design, contrasts) %>%
+  assign_deg()
+
+saveRDS(limma_result, "output/limma_result.rds")
+```
+
+#### Volcano plots
+```{r}
+df = readRDS("output/limma_result.rds")
+
+df %>%
+  plot_volcano() + 
+  my_theme(grid = "y")
+```
+
+### Functional analyses
+#### PROGENy - sample-wise
+```{r "progeny - sample-wise"}
+expr = readRDS("output/normalized_expression.rds")
+meta = readRDS("data/meta_df.rds") %>%
+  mutate(group = fct_relevel(group, "cirrhosis", "control"))
+
+
+pathway_scores = progeny(expr, top = 100, perm = 1, organism = "Human", scale=T,
+                         verbose = T) %>%
+  t() %>%
+  tdy("pathway", "sample", "activity", meta)
+
+# check for differences between cirrhosis and control
+progeny_stats = pathway_scores %>%
+  nest(data = -pathway) %>%
+  # filter(celltype == "HSC") %>%
+  mutate(stat = data %>% map(function(data) {
+    t.test(activity~group, data = data) %>%
+      tidy() %>%
+      select(statistic, p = p.value)
+  })) %>%
+  unnest(stat) %>%
+  mutate(fdr = p.adjust(p)) %>%
+  arrange(p) 
+
+saveRDS(progeny_stats, "output/pathway_scores_sample_wise.rds")
+
+pathway_scores = readRDS("output/pathway_scores_sample_wise.rds")
+
+pathway_scores %>%
+  unnest(data) %>%
+  ggplot(aes(x=group, y=activity)) +
+  geom_boxplot() +
+  # geom_point() +
+  # geom_line() +
+  facet_rep_wrap(~pathway) +
+  ggpubr::stat_compare_means(method = "wilcox") +
+  my_theme()
+
+```
+##### Heatmap
+```{r}
+pathway_scores = readRDS("output/pathway_scores_sample_wise.rds") %>%
+  unnest(data) %>%
+  rename(p_t = p, fdr_t = fdr)
+
+# make sure you generated the correlation results before 
+# (corresponding chunk is below)
+cor_res = readRDS("output/feature_vs_16srdna_cor.rds") %>%
+  filter(class == "pathway") %>%
+  select(-confidence, -class) %>%
+  rename(pathway = feature) %>%
+  arrange(pathway) %>%
+  mutate(pathway = as_factor(pathway)) %>%
+  rename(p_r = p, fdr_r = fdr)
+
+
+df = pathway_scores %>%
+  arrange(desc(group)) %>%
+  mutate(sample = as_factor(sample)) %>%
+  arrange(pathway) %>%
+  mutate(pathway = as_factor(pathway))
+
+meta = df %>%
+  distinct(pathway, sample, group, statistic, p_t, fdr_t) %>%
+  left_join(cor_res, by="pathway") %>%
+  distinct() %>%
+  arrange(pathway)
+
+mat_sig = df %>%
+  untdy("pathway", "sample", "activity") %>%
+  as.matrix()
+
+sample_annotation = meta %>%
+  distinct(sample, group) %>%
+  data.frame(row.names = 1) %>%
+  HeatmapAnnotation(df = ., show_legend = F, show_annotation_name = F,
+                    col = list(group = c(
+                      cirrhosis = muted(aachen_color("orange")), 
+                      control = muted(aachen_color("green")))))
+
+
+r_col_fun = circlize::colorRamp2(c(-0.6, 0, 0.6),
+                                 c(aachen_color("turquoise"), "white", 
+                                   aachen_color("violet")))
+
+stat_col_fun = circlize::colorRamp2(c(-6, 0, 6),
+                                    c(aachen_color("petrol"), "white", 
+                                      aachen_color("green")))
+pathway_annotation = meta %>%
+  arrange(pathway) %>%
+  # filter(fdr_t <= 0.05) %>%
+  distinct(pathway, r, statistic) %>%
+  data.frame(row.names = 1) %>%
+  rowAnnotation(df = ., col = list(r=r_col_fun, statistic = stat_col_fun))
+
+progeny_col_fun = circlize::colorRamp2(c(-4, 0, 4),
+                                     c(aachen_color("red"), "white", 
+                                       aachen_color("blue")))
+mat_sig %>%
+  ComplexHeatmap::Heatmap(col = progeny_col_fun, name = "Pathway\nactivity", 
+                          cluster_columns = F, row_split = 2,
+                          column_split = c(rep("Control", 8), 
+                                           rep("Cirrhosis", 22)), 
+                          top_annotation = sample_annotation,
+                          right_annotation = pathway_annotation,
+                          show_column_names = F,
+                          show_column_dend = F,
+                          show_row_dend = F, 
+                          row_title = "Pathways")
+
+```
+
+#### DoRothEA - sample-wise
+```{r "dorothea - sample-wise"}
+expr = readRDS("output/normalized_expression.rds")
+meta = readRDS("data/meta_df.rds") %>%
+  mutate(group = fct_relevel(group, "cirrhosis", "control"))
+
+data(dorothea_hs, package = "dorothea")
+
+tf_scores = run_viper(expr, dorothea_hs, 
+                      options = list(nes = T, method = "scale", minsize = 4, 
+                                     eset.filter = F), tidy = T) %>%
+  left_join(meta, by="sample")
+
+# test if we find differential TF activity between cirrhosis and healthy
+tf_stats = tf_scores %>%
+  nest(data = -c(tf, confidence)) %>%
+  mutate(stats = data %>% map(function(data) {
+    t.test(activity ~ group, data = data) %>%
+      tidy() %>%
+      select(statistic, p = p.value)
+  })) %>%
+  unnest(stats) %>%
+  mutate(fdr = p.adjust(p)) %>%
+  arrange(p) 
+
+saveRDS(tf_stats, "output/tf_scores_sample_wise.rds")
+
+tf_stats = readRDS("output/tf_scores_sample_wise.rds") %>%
+  unnest(data)
+
+# histogram of p values
+tf_stats %>%
+  plot_phist() +
+  my_theme(grid = "y")
+
+# significant 
+tf_stats %>%
+  filter(fdr <= 0.05) %>%
+  distinct(tf) %>%
+  left_join(tf_scores, by="tf") %>%
+  filter(confidence != "E") %>%
+  ggplot(aes(x=group, y=activity)) +
+  geom_boxplot() +
+  facet_rep_wrap(~tf) +
+  ggpubr::stat_compare_means() +
+  my_theme()
+```
+
+##### Heatmap
+```{r}
+tf_scores = readRDS("output/tf_scores_sample_wise.rds") %>%
+  unnest(data) %>%
+  rename(p_t = p, fdr_t = fdr)
+
+# make sure you generated the correlation results before 
+# (corresponding chunk is below)
+cor_res = readRDS("output/feature_vs_16srdna_cor.rds") %>%
+  filter(class == "tf") %>%
+  select(-class, -confidence) %>%
+  rename(tf = feature) %>%
+  rename(p_r = p, fdr_r = fdr)
+
+df = tf_scores %>%
+  filter(confidence %in% c("A", "B", "C")) %>%
+  left_join(cor_res, by="tf") %>% 
+  arrange(desc(group)) %>%
+  mutate(sample = as_factor(sample)) %>%
+  arrange(tf) %>%
+  mutate(tf = as_factor(tf)) %>%
+  filter(fdr_t <= 0.05 | p_r <= 0.05)
+  
+meta = df %>%
+  distinct(tf, sample, group, statistic, confidence, p_t, fdr_t, r, p_r, fdr_r) %>%
+  distinct() %>%
+  arrange(tf)
+
+mat_sig = df %>%
+  untdy("tf", "sample", "activity") %>%
+  as.matrix()
+
+sample_annotation = meta %>%
+  distinct(sample, group) %>%
+  data.frame(row.names = 1) %>%
+  HeatmapAnnotation(df = ., show_legend = F, show_annotation_name = F,
+                    col = list(group = c(cirrhosis = muted(aachen_color("orange")), 
+                                         control = muted(aachen_color("green")))))
+
+
+r_col_fun = circlize::colorRamp2(c(-0.6, 0, 0.6),
+                                 c(aachen_color("turquoise"), "white", 
+                                   aachen_color("violet")))
+
+stat_col_fun = circlize::colorRamp2(c(-6, 0, 6),
+                                    c(aachen_color("petrol"), "white", 
+                                      aachen_color("green")))
+tf_annotation = meta %>%
+  arrange(tf) %>%
+  # filter(tf <= 0.05) %>%
+  distinct(tf, r, statistic) %>%
+  data.frame(row.names = 1) %>%
+  rowAnnotation(df = ., col = list(r=r_col_fun, statistic = stat_col_fun))
+
+dorothea_col_fun = circlize::colorRamp2(c(-14, 0, 14),
+                                     c(aachen_color("red"), "white", 
+                                       aachen_color("blue")))
+mat_sig %>%
+  ComplexHeatmap::Heatmap(col = dorothea_col_fun, name = "TF activity", 
+                          cluster_columns = T,  row_split = 2,
+                          column_split = c(rep("Control", 8), 
+                                           rep("Cirrhosis", 22)), 
+                          top_annotation = sample_annotation, 
+                          right_annotation = tf_annotation,
+                          show_column_names = F, 
+                          show_column_dend = F,
+                          show_row_dend = F, 
+                          row_title = "Transcription factors")
+```
+
+
+### Microbiota analysis
+#### Bacteria taxanomy
+##### Distribution of bacteria abundance on order level
+```{r}
+bac = readRDS("data/bacteria.rds") %>%
+  pluck("order")
+
+bac %>%
+  gather(species, abundance, -id, -group) %>%
+  ggplot(aes(x=log2(abundance+1))) +
+  geom_density() +
+  facet_wrap(~species)
+
+bac %>%
+  gather(species, abundance, -id, -group) %>%
+  ggplot(aes(y=fct_reorder(species, abundance, median), x=abundance)) +
+  geom_boxplot() +
+  theme(axis.text.y = element_text(size=8))
+
+mat = bac %>%
+  select(-group) %>%
+  data.frame(row.names = 1)
+
+mat = ifelse(mat>0,1,0)
+
+anno = bac %>%
+  select(id, group) %>%
+  data.frame(row.names = 1)
+
+pheatmap::pheatmap(mat, annotation_row = anno, border_color = NA) %>%
+  ggplotify::as.ggplot()
+```
+
+##### Pairwise correlation of clinical numeric features and bacteria families
+```{r}
+bac = readRDS("data/bacteria.rds") %>%
+  pluck("order")
+
+clinical_data = readRDS("data/clinical_data.rds") %>%
+  select_if(function(col) is.numeric(col) | is.character(col))
+
+# find common samples and subset to those
+common_ids = intersect(bac$id, clinical_data$id)
+bac = bac %>% filter(id %in% common_ids)
+clinical_data = clinical_data %>% filter(id %in% common_ids)
+
+# remove bacterial with 0 variance/constant abundance across samples
+keep = bac %>%
+  select_if(is.double) %>%
+  apply(2, function(c) sum(c != 0)) %>%
+  enframe("bacteria", "n") %>%
+  # keep only bacteria that have more than 2/3 non-zero values
+  filter(n >= as.integer(nrow(bac)*0.66)) %>%
+  pull(bacteria)
+
+bac_sub = bac %>%
+  select(id, group, {{keep}})
+
+# get list of bacteria and clinical features
+bacteria_list = setdiff(colnames(bac_sub), c("id", "group"))
+clinical_feature_list = setdiff(colnames(clinical_data), c("id"))
+
+# build a design table of all possible correlations
+design = crossing(bacteria = bacteria_list, clinical_feature = clinical_feature_list) %>%
+  unite(key, bacteria, clinical_feature, remove = F)
+
+# perform pairwise correlation
+cor_res = design %>%
+  pmap_dfr(.f = function(bacteria, clinical_feature, ...) {
+    df = inner_join(
+      bac_sub %>% select(id, b = {{bacteria}}),
+      clinical_data %>% select(id, f = {{clinical_feature}}),
+      by="id"
+    ) %>% 
+      drop_na()
+
+    cor.test(df[["b"]], df[["f"]], method = "spearman") %>%
+      tidy() %>%
+      select(r = estimate, p = p.value) %>%
+      mutate(df = list(df))
+}) %>% 
+  bind_cols(design, .)
+
+saveRDS(cor_res, "output/clinical_vs_bacteria_order_cor.rds")
+cor_res = readRDS("output/clinical_vs_bacteria_order_cor.rds")
+
+cor_res %>%
+  group_by(clinical_feature) %>%
+  mutate(fdr = p.adjust(p, method = "BH")) %>%
+  arrange(p)
+ 
+cor_res %>%
+  plot_phist() +
+  my_theme(grid = "y")
+
+x = cor_res %>% 
+  arrange(p) %>%
+  filter(p <= 0.05) %>%
+  unnest(df)
+
+x %>%
+  ggplot(aes(x=b, y=f)) +
+  geom_point() +
+  facet_rep_wrap(~key, scales="free") +
+  labs(x="Species abundance", y="Clinical feature") +
+  geom_smooth(aes(x=b, y=f), 
+              inherit.aes = F, method = "lm", se = F) +
+  my_theme()
+```
+
+##### Correlation of bacteria abundance with genes/pathways/TFs
+```{r}
+rdna = readRDS("data/rdna.rds") %>%
+  drop_na(sample) %>%
+  select(-rdna)
+bac = readRDS("data/bacteria.rds") %>%
+  pluck("order") %>%
+  inner_join(rdna) %>%
+  select(id, sample, group, everything())
+
+# remove bacterial with 0 variance/constant abundance across samples
+keep = bac %>%
+  select_if(is.double) %>%
+  apply(2, function(c) sum(c != 0)) %>%
+  enframe("bacteria", "n") %>%
+  # keep only bacteria that have more than 2/3 non-zero values
+  filter(n >= as.integer(nrow(bac)*0.66)) %>%
+  pull(bacteria)
+
+bac_sub = bac %>%
+  select(id, group, sample, {{keep}})
+
+meta = readRDS("data/meta_df.rds")
+
+# load expression data
+expr = readRDS("output/normalized_expression.rds") %>%
+  tdy("gene", "sample", expression, meta) %>%
+  rename(feature = gene, value = expression) %>%
+  mutate(class = "gene")
+
+# load pathway activties
+pathways = readRDS("output/pathway_scores_sample_wise.rds") %>%
+  unnest(data) %>%
+  rename(feature = pathway, value = activity) %>%
+  mutate(class = "pathway")
+
+# load tf activities
+tfs = readRDS("output/tf_scores_sample_wise.rds") %>%
+  unnest(data)
+  rename(feature = tf, value = activity) %>%
+  mutate(class = "tf")
+
+df = bind_rows(expr, pathways, tfs) %>%
+  nest(data = -c(feature, class, confidence)) %>%
+  unite(feature, class, feature, sep = "--", remove = F)
+
+bacteria_list = setdiff(colnames(bac_sub), c("id", "group", "sample"))
+feature_list = df$feature
+
+design = crossing(bacteria = bacteria_list, feature = feature_list) %>%
+  unite(key, bacteria, feature, remove = F)
+
+cor_res = design %>% 
+  pmap_dfr(., .f = function(bacteria, feature, ...) {
+    df2 = inner_join(
+      bac_sub %>% select(sample, b = {{bacteria}}),
+      df %>% filter(feature == {{feature}}) %>% unnest(data),
+      by="sample"
+    ) %>%
+      select(sample, group, b, value)
+    
+    f = as.formula(str_c("~", "b + value"))
+    cor.test(f, data = df2, method = "spearman") %>%
+      tidy() %>%
+      select(r = estimate, p.value) %>%
+      mutate(data = list(df2))
+}) %>% 
+  bind_cols(design, .) %>%
+  separate(feature, into = c("class", "feature"), sep = "--") %>%
+  group_by(class) %>%
+  mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+saveRDS(cor_res, "output/feature_vs_bacteria_order_cor.rds")
+
+cor_res = readRDS("output/feature_vs_bacteria_order_cor.rds")
+
+cor_res %>%
+  filter(class == "tf") %>%
+  group_by(bacteria, class) %>%
+  mutate(fdr_per_bacteria = p.adjust(p.value, method = "BH")) %>%
+  ungroup() %>%
+  mutate(fdr_total = p.adjust(p.value, method = "BH")) %>%
+  arrange(p.value) %>%
+  select(-fdr) %>%
+  arrange(fdr_per_bacteria)
+
+plot_phist(cor_res, "class", scales = "free") +
+  my_theme(grid = "y")
+
+cor_res %>% 
+  filter(class == "gene") %>%
+  plot_phist()
+
+cor_res %>%
+  group_by(bacteria, class) %>%
+  mutate(new_fdr = p.adjust(p.value, method = "BH")) %>%
+  arrange(new_fdr)
+
+g = cor_res %>% 
+  arrange(fdr, p.value) %>% 
+  filter(p.value <= 0.05) %>%
+  group_by(class) %>%
+  top_n(5, -p.value) %>%
+  ungroup() %>%
+  select(key)
+
+
+cor_res %>% 
+  semi_join(g) %>%
+  select(-feature,-class) %>%
+  unnest(data) %>%
+  ggplot(aes(x=b, y=value, color = group)) +
+  geom_point() +
+  facet_rep_wrap(~key, scales="free") +
+  my_theme() +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux"))) +
+  theme(legend.position = "top") +
+  geom_smooth(aes(x=b, y=value), inherit.aes = F, method = "lm") +
+  labs(y = "Normalized expression/Activity", x= "Bacteria abundance")
+```
+
+
+##### Anova of categorical clinical features and bacteria taxanomy level
+```{r}
+bac = readRDS("data/bacteria.rds") %>%
+  pluck("order")
+clinical_data = readRDS("data/clinical_data.rds") %>%
+  select_if(function(col) is.factor(col) | is.character(col))
+
+common_ids = intersect(bac$id, clinical_data$id)
+
+bac = bac %>% filter(id %in% common_ids)
+clinical_data = clinical_data %>% filter(id %in% common_ids)
+
+# remove bacterial with 0 variance/constant abundance across samples
+keep = bac %>%
+  select_if(is.double) %>%
+    apply(2, function(c) sum(c != 0)) %>%
+  enframe("bacteria", "n") %>%
+  # keep only bacteria that have more than 2/3 non-zero values
+  filter(n >= as.integer(nrow(bac)*0.66)) %>%
+  pull(bacteria)
+
+bac_sub = bac %>%
+  select(id, group, {{keep}})
+
+bacteria_list = setdiff(colnames(bac_sub), c("id", "group"))
+clinical_feature_list = setdiff(colnames(clinical_data), c("id"))
+
+design = crossing(bacteria = bacteria_list, clinical_feature = clinical_feature_list) %>%
+  unite(key, bacteria, clinical_feature, remove = F)
+
+aov_res = pmap_dfr(design, .f = function(bacteria, clinical_feature, ...) {
+    df2 = inner_join(
+      bac_sub %>% select(id, b = {{bacteria}}),
+      clinical_data %>% select(id, f = {{clinical_feature}}),
+      by="id"
+    ) %>% 
+      drop_na()
+    
+    f = as.formula(str_c("b", "~", "f"))
+    aov(f, data = df2) %>%
+      tidy() %>%
+      filter(term != "Residuals") %>%
+      mutate(data = list(df2))
+}) %>% 
+  bind_cols(design, .)
+
+saveRDS(aov_res, "output/clinical_vs_bacteria_order_aov.rds")
+aov_res = readRDS("output/clinical_vs_bacteria_order_aov.rds")
+
+aov_res %>%
+  plot_phist() +
+  my_theme(grid = "y")
+
+aov_res %>%
+  group_by(clinical_feature) %>%
+  mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+  arrange(fdr)
+
+x = aov_res %>% 
+  arrange(p.value) %>%
+  filter(p.value <= 0.05) %>%
+  unnest(data)
+
+x %>%
+  ggplot(aes(x=f, y=b)) +
+  geom_boxplot() + 
+  geom_jitter(alpha = 0.3) +
+  facet_rep_wrap(~key, scales="free") +
+  labs(y="Species abundance", x="Clinical feature") +
+  my_theme() +
+  theme(strip.text.x = element_text(size = 12))
+```
+
+##### Difference in bacteria abundance betweeen control and cirrhosis
+```{r}
+bac = readRDS("data/bacteria.rds") %>% pluck("order")
+
+df = bac %>%
+  gather(species, abundance, -id, -group) %>%
+  nest(data = -species) %>%
+  mutate(stat = data %>% map(function(data) {
+    wilcox.test(abundance ~ group, data = data) %>%
+      tidy() %>%
+      select(-method)
+  })) %>%
+  unnest(stat)
+
+df %>%
+  plot_phist() +
+  my_theme(grid = "y")
+
+df %>% arrange(p.value)
+
+df %>% 
+  arrange(p.value) %>% 
+  slice(1) %>% 
+  unnest(data) %>%
+  ggplot(aes(x=group, y=abundance)) +
+  geom_boxplot()
+```
+
+#### 16srDNA
+##### Clinical data correlation with 16srDNA
+```{r}
+rdna = readRDS("data/rdna.rds")
+clinical_data = readRDS("data/clinical_data.rds") %>%
+  select_if(function(col) is.numeric(col) | is.character(col))
+
+# make sure that patients are in same order in rdna and clinical_data
+i = clinical_data %>%
+  left_join(rdna)
+
+v = i %>%
+  select(id, rdna) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F) %>%
+  as.matrix()
+
+mat = i %>% 
+  mutate_if(is.factor, as.numeric) %>%
+  select(-rdna, -sample, -group) %>%
+  data.frame(row.names = 1, check.names = F, stringsAsFactors = F) %>%
+  as.matrix()
+
+cor_res = apply(mat, 2, function(col) {
+  stopifnot(names(col) == rownames(v))
+  cor.test(col, v, method = "spearman") %>%
+    tidy() %>%
+    select(-statistic, r = estimate, everything())
+}) %>%
+  enframe(name = "feature") %>%
+  unnest(value) %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+cor_res %>%
+  filter(feature == "thrombozyten_gl")
+
+sig_feats = cor_res %>%
+  filter(p.value <= 0.1) %>%
+  pull(feature)
+
+i %>% 
+  select(rdna, group, {{sig_feats}}) %>%
+  gather(feature, value, -rdna, -group) %>%
+  mutate(value = as.numeric(value)) %>%
+  ggplot(aes(x=rdna, y=value, color = group)) +
+  geom_point() +
+  facet_rep_wrap(~feature, scales="free") +
+  geom_smooth(method = "lm", se = F) +
+  my_theme() +
+  labs(y = "Clinical feature value", x= "16s rDNA copies/ng DNA") +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux"))) 
+
+
+# anova  
+rdna = readRDS("data/rdna.rds")
+clinical_data = readRDS("data/clinical_data.rds") %>%
+  select_if(function(col) is.factor(col) | is.character(col))
+
+# make sure that patients are in same order in rdna and clinical_data
+i = clinical_data %>%
+  left_join(rdna)
+
+features = i %>%
+  select_if(is.factor) %>%
+  select(-group) %>%
+  colnames()
+
+aov_res = map_dfr(features, function(f) {
+  d = i %>% 
+    select(f = {{f}}, rdna)
+  res = aov(rdna~f, data = d) %>%
+    tidy() %>%
+    filter(term != "Residuals") %>%
+    mutate(term = {{f}}) %>%
+    select(term, statistic, p.value)
+})
+
+# # deeper investigation of hepatic encephalopathy
+# x = i %>% 
+#   select(rdna, hepatische_enzephalopathie) %>%
+#   drop_na()
+# 
+# t.test(rdna ~ hepatische_enzephalopathie, data = x)
+# 
+# cor.test(~rdna+as.numeric(hepatische_enzephalopathie), data = x)
+# 
+# t.test(x$rdna, x$hepatische_enzephalopathie)
+```
+
+##### Feature-wise correlation of expression and 16srDNA abundance
+```{r}
+meta = readRDS("data/meta_df.rds")
+
+expr = readRDS("output/normalized_expression.rds") %>%
+  tdy("gene", "sample", expression, meta) %>%
+  rename(feature = gene, value = expression) %>%
+  mutate(class = "gene")
+pathways = readRDS("output/pathway_scores_sample_wise.rds") %>%
+  unnest(data) %>%
+  rename(feature = pathway, value = activity) %>%
+  mutate(class = "pathway")
+tfs = readRDS("output/tf_scores_sample_wise.rds") %>%
+  unnest(data) %>%
+  rename(feature = tf, value = activity) %>%
+  mutate(class = "tf")
+
+rdna = readRDS("data/rdna.rds")
+
+df = bind_rows(expr, pathways, tfs) %>%
+  left_join(rdna, by=c("sample", "group")) %>%
+  select(-c(statistic, p, fdr))
+  
+
+cor_res = df %>%
+  nest(data = -c(feature, confidence, class)) %>%
+  mutate(r = data %>% map(function(data) {
+    cor.test(data$rdna, data$value, method = "spearman") %>%
+      tidy() %>%
+      select(r = estimate, p = p.value)
+  })) %>%
+  select(-data) %>%
+  unnest(r) %>%
+  group_by(class) %>%
+  mutate(fdr = p.adjust(p, method = "fdr")) %>%
+  ungroup()
+  
+
+saveRDS(cor_res, "output/feature_vs_16srdna_cor.rds")
+
+cor_res = readRDS("output/feature_vs_16srdna_cor.rds")
+
+plot_phist(cor_res, "class", scales = "free") +
+  my_theme(grid = "y")
+
+g = cor_res %>% 
+  arrange(fdr, p) %>% 
+  filter(p <= 0.05) %>%
+  group_by(class) %>%
+  top_n(5, -p)
+
+
+df %>% 
+  semi_join(g) %>%
+  # filter(feature %in% c("NLRP3", "TLR5")) %>%
+  ggplot(aes(x=rdna, y=value, color = group)) +
+  geom_point() +
+  facet_rep_wrap(~class+feature, scales="free") +
+  my_theme() +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux"))) +
+  theme(legend.position = "top") +
+  geom_smooth(aes(x=rdna, y=value), inherit.aes = F, method = "lm") +
+  labs(y = "Normalized expression/Activity", x= "16s rDNA copies/ng DNA")
+
+cor_res %>%
+  filter(feature %in% c("NLRP3", "TLR5", "GATA4"))
+
+
+
+# tf activity and expresssion
+cor_res %>%
+  filter(p<=0.05) %>%
+  count(feature) %>%
+  filter(n>1) %>%
+  semi_join(df, .) %>%
+  group_by(feature, class) %>%
+  mutate(value = scale(value)) %>%
+  ungroup() %>%
+  ggplot(aes(x=rdna, y=value, group = class, color = class)) + 
+  geom_point() +
+  facet_rep_wrap(~feature) +
+  geom_smooth(aes(x=rdna, y=value, group = class, color = class), 
+              inherit.aes = F, method = "lm", se = F) +
+  my_theme() +
+  labs(y = "Normalized expression", x = "16s rDNA copies/ng DNA")
+
+reproducability_genes = c("NLRP3", "TLR5", "TLR2", "CSF2RA", "IL1R2","CTLA4", 
+                          "PDCD1", "TOX", "IRF4", "NFATC1", "BATF", "TOX3", 
+                          "GATA4", "MCC", "IDH2", "HNF1A", "FOXA3")
+
+x = df %>%
+  filter(feature %in% reproducability_genes  & class == "gene") %>%
+  inner_join(cor_res)
+
+l = x %>% 
+  distinct(feature, r, p, fdr) %>%
+  mutate_if(is.double, signif , 3)
+
+x %>%
+  ggplot(aes(x=rdna, y=value, color = group)) + 
+  geom_point() +
+  facet_rep_wrap(~feature) +
+  geom_smooth(aes(x=rdna, y=value), 
+              inherit.aes = F, method = "lm", se = F) +
+  geom_label(data = l, inherit.aes = F, aes(x = 12, y=7.5, label = interaction(r, p, fdr, sep = "_"))) +
+  my_theme() +
+  scale_color_manual(values = aachen_color(c("blue", "bordeaux"))) +
+  labs(y = "Normalized expression", x = "16s rDNA copies/ng DNA")
+```
+
+##### Different in 16srDNA between control and cirrhosis group
+```{r}
+rdna = readRDS("data/rdna.rds")
+meta = readRDS("data/meta_df.rds")
+
+rdna %>% 
+  ggplot(aes(x=group, y=rdna)) +
+  geom_boxplot() +
+  geom_jitter() +
+  ggpubr::stat_compare_means(method = "t.test") +
+  my_theme(grid = "y")
+```
+
+##### Plots
+```{r}
+cor_res = readRDS("output/feature_vs_16srdna_cor.rds") %>%
+  filter(class == "gene") %>%
+  select(gene = feature, r, p, fdr)
+genes_of_interest = read_csv2("data/genes_of_interest.csv") %>%
+  gather(set, gene) %>%
+  drop_na()
+
+meta = readRDS("data/meta_df.rds")
+expr = readRDS("output/normalized_expression.rds") %>%
+  tdy("gene", "sample", expression, meta)
+
+rdna = readRDS("data/rdna.rds")
+
+
+cor_res %>%
+  inner_join(genes_of_interest) %>%
+  mutate(label = gtools::stars.pval(p),
+         x_label = 0.75 * r) %>%
+  filter(p <= 0.05) %>%
+  # filter(fdr <= 0.2) %>%
+  ggplot(aes(x=r, y=fct_reorder(gene, r), fill=r)) +
+  geom_col() +
+  facet_rep_wrap(~set, scales = "free_y") +
+  scale_fill_gradient2(low = aachen_color("blue"), mid = "white", high = aachen_color("red")) +
+  my_theme(grid = "x") +
+  geom_text(aes(label = label, x=x_label), color = "white", 
+            size = (5/14) * 11) +
+  labs(x="Spearman correlation", y="Genes")
+
+expr %>%
+  inner_join(genes_of_interest, by="gene") %>%
+  inner_join(cor_res, by="gene") %>%
+  inner_join(rdna, by=c("group", "sample")) %>%
+  filter(gene == "CTLA4") %>%
+  ggplot(aes(x=rdna, y=expression)) +
+  geom_point(aes(color = group)) +
+  geom_smooth(method = "lm", se = F) +
+  my_theme()
+```
+
+#### Cell type deconvolution
+##### xcell
+```{r}
+meta = readRDS("data/meta_df.rds") %>%
+  mutate(group = fct_relevel(group, "cirrhosis", "control"))
+count_matrix = read.table("data/Trautwein_human-rawdata.txt")
+
+# removes genes with contant expression across all samples (including genes with 0 counts)
+keep = apply(count_matrix, 1, var) != 0
+sub_count_matrix = count_matrix[keep,]
+
+# convert counts to tpm
+tpm_matrix = counts_to_tpm(sub_count_matrix)
+
+xcell_res = xCellAnalysis(tpm_matrix)
+
+keep_celltypes = c("iDC", "ImmuneScore", "CD8+ T-cells", "Tregs", "Epithelial cells", 
+                   "NKT", "MicroenvironmentScore", "Fibroblasts", 
+                   "StromaScore", "Hepatocytes", "Th1 cells", "GMP", "CD4+ Tcm",
+                   "aDC")
+
+tidy_xcell_res = xcell_res %>%
+  tdy(feature = "celltype", value = "value", key = "sample", meta) %>%
+  filter(celltype %in% keep_celltypes) %>%
+  group_by(celltype) %>%
+  mutate(z = scale(value)) %>%
+  ungroup()
+
+# overview
+tidy_xcell_res %>%
+  ggplot(aes(y=fct_reorder(celltype, value, median), x=value)) +
+  geom_vline(xintercept = 0) +
+  geom_boxplot() +
+  labs(x="xcell score", y="Celltype") +
+  my_theme(grid = "x")
+
+# check for which celltype we find significant differences between control and cirrhosis
+stats = tidy_xcell_res %>%
+  nest(data = -celltype) %>%
+  # filter(celltype == "HSC") %>%
+  mutate(stat = data %>% map(function(data) {
+    t.test(z~group, data = data) %>%
+      tidy() %>%
+      dplyr::select(statistic, p = p.value)
+  })) %>%
+  unnest(stat) %>%
+  mutate(fdr = p.adjust(p, method = "BH")) %>%
+  arrange(p)
+
+saveRDS(unnest(stats, data), "output/xcell_result.rds")
+
+plot_phist(stats) + my_theme(grid = "y")
+
+stats %>%
+  filter(fdr <= 0.05) %>%
+  # print(n=Inf)
+  unnest(data) %>%
+  ggplot(aes(x=group, y=z)) +
+  geom_hline(yintercept = 0) +
+  geom_boxplot() +
+  facet_rep_wrap(~celltype, scales = "free") +
+  my_theme(grid = "y") +
+  ggpubr::stat_compare_means() +
+  labs(y = "Scaled xcell score")
+```
+
+##### Correlation of xcell scores with 16 rna
+```{r}
+xcell = readRDS("output/xcell_result.rds") %>%
+  rename(fdr_t = fdr, p_t = p)
+
+rdna = readRDS("data/rdna.rds")
+
+df = xcell %>%
+  left_join(rdna, by=c("sample", "group"))
+  
+
+cor_res = df %>%
+  nest(data = -c(celltype, p_t, fdr_t, statistic)) %>%
+  mutate(r = data %>% map(function(data) {
+    cor.test(data$rdna, data$z, method = "spearman") %>%
+      tidy() %>%
+      select(r = estimate, p = p.value)
+  })) %>%
+  select(-data) %>%
+  unnest(r) %>%
+  mutate(fdr = p.adjust(p, method = "fdr")) %>%
+  ungroup() %>%
+  arrange(p) %>%
+  rename(p_r = p, fdr_r = fdr)
+  
+
+saveRDS(cor_res, "output/xcell_vs_16srdna_cor.rds")
+
+
+```
+
+
+##### (Complex) Heatmap
+```{r}
+cor_res = readRDS("output/xcell_vs_16srdna_cor.rds") %>%
+  arrange(celltype) %>%
+  mutate(celltype = as_factor(celltype))
+xcell_res = readRDS("output/xcell_result.rds")
+
+df = xcell_res %>%
+  arrange(desc(group)) %>%
+  mutate(sample = as_factor(sample)) %>%
+  arrange(celltype) %>%
+  mutate(celltype = as_factor(celltype))
+
+meta = df %>%
+  distinct(celltype, sample, group) %>%
+  left_join(cor_res, by="celltype") %>%
+  distinct() %>%
+  arrange(celltype)
+
+mat_sig = df %>%
+  # filter(fdr <= 0.05) %>%
+  untdy("celltype", "sample", "z") %>%
+  as.matrix()
+
+sample_annotation = meta %>%
+  distinct(sample, group) %>%
+  data.frame(row.names = 1) %>%
+  HeatmapAnnotation(df = ., show_legend = F, show_annotation_name = F,
+                    col = list(group = c(cirrhosis = muted(aachen_color("orange")), 
+                                         control = muted(aachen_color("green")))))
+
+
+r_col_fun = circlize::colorRamp2(c(-0.6, 0, 0.6),
+                                 c(aachen_color("turquoise"), "white", 
+                                   aachen_color("violet")))
+
+stat_col_fun = circlize::colorRamp2(c(-5, 0, 5),
+                                    c(aachen_color("petrol"), "white", 
+                                      aachen_color("green")))
+celltype_annotation = meta %>%
+  arrange(celltype) %>%
+  # filter(fdr_t <= 0.05) %>%
+  distinct(celltype, r, statistic) %>%
+  data.frame(row.names = 1) %>%
+  rowAnnotation(df = ., col = list(r=r_col_fun, statistic = stat_col_fun),
+                simple_anno_size = unit(1, "cm"))
+
+xcell_col_fun = circlize::colorRamp2(c(-3, 0, 3),
+                                     c(aachen_color("red"), "white", 
+                                       aachen_color("blue")))
+mat_sig %>%
+  ComplexHeatmap::Heatmap(col = xcell_col_fun, name = "xCell score", 
+                          cluster_columns = T, 
+                          column_split = c(rep("Control", 8), 
+                                           rep("Cirrhosis", 22)), row_split = 2, 
+                          top_annotation = sample_annotation, 
+                          right_annotation = celltype_annotation,
+                          show_column_names = F, 
+                          show_column_dend = F,
+                          show_row_dend = F, 
+                          row_title = "Celltypes", column_title = "Samples", 
+                          column_title_side = "bottom"
+                          )
+
+```
+
