@@ -10,8 +10,8 @@ This repository deals exclusively with the analysis of the **Human** RNA-seq dat
 
 More information of the
 
-* `data` folder [here]()
-* `output` folder [here]()
+* `data` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/data)
+* `output` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/output)
 
 ***
 
