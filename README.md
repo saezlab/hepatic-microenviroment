@@ -6,7 +6,7 @@ Hepatocellular carcinoma (HCC) is a leading cause of cancer-related deaths world
 *** 
 
 ### Content
-This repository deals exclusively with the analysis of the **Human** RNA-seq data. The mouse models mentioned in the abstract were analyzed elsewhere. 
+This repository deals exclusively with the analysis of the **human** RNA-seq data (Cirrhosis cohort). The mouse models mentioned in the abstract were analyzed elsewhere. 
 
 More information of the
 
@@ -24,6 +24,17 @@ More information of the
 * Microbiata analysis (correlation analysis with 16s rRNA) available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L715).
 
 * Celltype deconvolution available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L968).
+
+***
+
+### Misc
+In case you are interested in reproduing the results you can install easily all required packages with the workflow from the [`renv`](https://rstudio.github.io/renv/index.html) package. This ensures also that the correct version of the required packages is installed.
+
+First clone the repository and then run the following command:
+```
+# install all required packages using the renv package
+renv::restore()
+```
 
 ***
 
