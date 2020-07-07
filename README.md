@@ -30,7 +30,7 @@ More information of the
 ### Misc
 In case you are interested in reproduing the results you can install easily all required packages with the workflow from the [`renv`](https://rstudio.github.io/renv/index.html) package. This ensures also that the correct version of the required packages is installed.
 
-First clone the repository and then run the following command:
+First clone the repository and then run the following command in an R session:
 ```
 # install all required packages using the renv package
 renv::restore()
