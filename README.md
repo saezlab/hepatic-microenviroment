@@ -10,12 +10,22 @@ This repository deals exclusively with the analysis of the **Human** RNA-seq dat
 
 More information of the
 
-* `data` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/data)
-* `output` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/output)
+* `data` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/data).
+* `output` folder [here](https://github.com/saezlab/hepatic-microenviroment/tree/master/output).
 
 ***
 
+### Analyses and scripts
 
+* Basic analysis of patient cohort (normalization, clustering, differential gene expression analysis) available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L40).
+
+* Functional analyses (pathway/transcription factor analysis) available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L148).
+
+* Microbiata analysis (correlation analysis with 16s rRNA) available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L715).
+
+* Celltype deconvolution available [here](https://github.com/saezlab/hepatic-microenviroment/blob/master/analyses/transcriptome_analysis.Rmd#L968).
+
+***
 
 ### How to cite?
 > Schneider KM, Mohs A, Gui W, Galvez EJC, Candels LS, Holland CH, Elfers C, Kilic K, Schneider CV, Strnad P, Wirtz TH, Marschall HU, Latz E, Lelouvier B, Saez-Rodriguez J, de Vos W, Strowig T, Trebicka J and Trautwein C. "Gut microbiota fuels HCC development by shaping the hepatic inflammatory microenvironment." _In preparation_. 2020.
